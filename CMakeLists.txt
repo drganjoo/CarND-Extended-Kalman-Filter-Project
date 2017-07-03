@@ -9,7 +9,6 @@ set(CMAKE_CXX_FLAGS, "${CXX_FLAGS}")
 
 set(sources src/main.cpp src/tools.cpp src/FusionEKF.cpp src/kalman_filter.cpp src/tools.h src/FusionEKF.h src/kalman_filter.h)
 
-
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin") 
 
 include_directories(/usr/local/include)
@@ -20,7 +19,20 @@ link_directories(/usr/local/Cellar/libuv/1.11.0/lib)
 
 endif(${CMAKE_SYSTEM_NAME} MATCHES "Darwin") 
 
+if (MSVC)
+    set(VCPKG_INSTALL ${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET})
+    message("Using vcpkg_install ${VCPKG_INSTALL}")
+    include_directories(${VCPKG_INSTALL}/include)
+    link_directories(${VCPKG_INSTALL}/lib)
+endif()
 
 add_executable(ExtendedKF ${sources})
 
-target_link_libraries(ExtendedKF z ssl uv uWS)
+if (NOT WIN32)
+    target_link_libraries(ExtendedKF z ssl uv uWS)
+else()
+    target_link_libraries(ExtendedKF ssleay32 libuv uWS ws2_32)
+    target_link_libraries(ExtendedKF optimized zlib)
+	target_link_libraries(ExtendedKF debug zlibd)
+endif()
+

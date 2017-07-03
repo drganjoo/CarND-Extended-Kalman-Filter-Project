@@ -1,115 +1,80 @@
+//
+// Created by Fahad Zubair on 22/06/2017.
+//
+
+#include <memory>
+#include <iostream>
+#include <cassert>
 #include "FusionEKF.h"
 #include "tools.h"
-#include "Eigen/Dense"
-#include <iostream>
 
 using namespace std;
-using Eigen::MatrixXd;
-using Eigen::VectorXd;
-using std::vector;
-
-/*
- * Constructor.
- */
-FusionEKF::FusionEKF() {
-  is_initialized_ = false;
-
-  previous_timestamp_ = 0;
-
-  // initializing matrices
-  R_laser_ = MatrixXd(2, 2);
-  R_radar_ = MatrixXd(3, 3);
-  H_laser_ = MatrixXd(2, 4);
-  Hj_ = MatrixXd(3, 4);
-
-  //measurement covariance matrix - laser
-  R_laser_ << 0.0225, 0,
-        0, 0.0225;
-
-  //measurement covariance matrix - radar
-  R_radar_ << 0.09, 0, 0,
-        0, 0.0009, 0,
-        0, 0, 0.09;
-
-  /**
-  TODO:
-    * Finish initializing the FusionEKF.
-    * Set the process and measurement noises
-  */
+using namespace Eigen;
 
 
+SensorFusion::SensorFusion() {
+
+    R_laser_ = MatrixXd(2, 2);
+    R_laser_ << 0.0225, 0,
+            0, 0.0225;
+
+    R_radar_ = MatrixXd(3, 3);
+    R_radar_ << 0.09, 0, 0,
+            0, 0.0009, 0,
+            0, 0, 0.09;
+
+
+    /**
+    * Update the state transition matrix F according to the new elapsed time.
+    * Time is measured in seconds.
+    * Update the process noise covariance matrix.
+    * Use noise_ax = 9 and noise_ay = 9 for your Q matrix.
+    */
+
+    kf_ = std::unique_ptr<KalmanFilter>(new KalmanFilter(3, 3));
+    last_timestamp_ = 0;
+    initialized_ = false;
 }
 
-/**
-* Destructor.
-*/
-FusionEKF::~FusionEKF() {}
+void SensorFusion::ProcessMeasurement(const Laser &l) {
+    assert(initialized_);
 
-void FusionEKF::ProcessMeasurement(const MeasurementPackage &measurement_pack) {
+    Eigen::VectorXd z(2);
+    z << l.x, l.y;
 
+    double dt = GetDtAndSaveTimeStamp(l);
+    kf_->Predict(dt);
+    kf_->Update(z, R_laser_);
+}
 
-  /*****************************************************************************
-   *  Initialization
-   ****************************************************************************/
-  if (!is_initialized_) {
-    /**
-    TODO:
-      * Initialize the state ekf_.x_ with the first measurement.
-      * Create the covariance matrix.
-      * Remember: you'll need to convert radar from polar to cartesian coordinates.
-    */
-    // first measurement
-    cout << "EKF: " << endl;
-    ekf_.x_ = VectorXd(4);
-    ekf_.x_ << 1, 1, 1, 1;
+void SensorFusion::ProcessMeasurement(const Radar &r) {
+    assert(initialized_);
 
-    if (measurement_pack.sensor_type_ == MeasurementPackage::RADAR) {
-      /**
-      Convert radar from polar to cartesian coordinates and initialize state.
-      */
-    }
-    else if (measurement_pack.sensor_type_ == MeasurementPackage::LASER) {
-      /**
-      Initialize state.
-      */
-    }
+    Eigen::VectorXd z(3);
+    z << r.rho, r.phi, r.rhodot;
 
-    // done initializing, no need to predict or update
-    is_initialized_ = true;
-    return;
-  }
+    double dt = GetDtAndSaveTimeStamp(r);
+    kf_->Predict(dt);
+    kf_->UpdateEKF(z, R_radar_);
+}
 
-  /*****************************************************************************
-   *  Prediction
-   ****************************************************************************/
+void SensorFusion::Initialize(const Laser &l) {
+    Eigen::Vector4d init_state(l.x, l.y, 0, 0);
 
-  /**
-   TODO:
-     * Update the state transition matrix F according to the new elapsed time.
-      - Time is measured in seconds.
-     * Update the process noise covariance matrix.
-     * Use noise_ax = 9 and noise_ay = 9 for your Q matrix.
-   */
+    kf_->Initialize(init_state);
+    last_timestamp_ = l.timestamp;
 
-  ekf_.Predict();
+    initialized_ = true;
+}
 
-  /*****************************************************************************
-   *  Update
-   ****************************************************************************/
+void SensorFusion::Initialize(const Radar &r) {
+    double x = r.rho * cos(r.phi);
+    double y = r.rho * sin(r.phi);
 
-  /**
-   TODO:
-     * Use the sensor type to perform the update step.
-     * Update the state and covariance matrices.
-   */
+    Eigen::Vector4d init_state(x, y, 0, 0);
 
-  if (measurement_pack.sensor_type_ == MeasurementPackage::RADAR) {
-    // Radar updates
-  } else {
-    // Laser updates
-  }
+    kf_->Initialize(init_state);
+    last_timestamp_ = r.timestamp;
 
-  // print the output
-  cout << "x_ = " << ekf_.x_ << endl;
-  cout << "P_ = " << ekf_.P_ << endl;
+    initialized_ = true;
 }

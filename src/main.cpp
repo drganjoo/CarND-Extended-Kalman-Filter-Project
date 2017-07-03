@@ -1,272 +1,257 @@
-#include <uWS/uWS.h>
 #include <iostream>
-#include "json.hpp"
-#include <math.h>
+#include <fstream>
+#include <algorithm>
+#include <string>
+
+#ifndef _WIN32
+
+#include <unistd.h>
+#include <uWS/uWS.h>
+
+#else
+
+// disable warnings in uWS/uWS code
+#pragma warning(push)
+#pragma warning(disable:4251)
+#pragma warning(disable:4800)
+#pragma warning(disable:4996)
+
+#include <uWS/uWS.h>
+
+#pragma warning(pop)
+
+#endif
+
+#include <sstream>
+#include "measurements.h"
 #include "FusionEKF.h"
 #include "tools.h"
+#include "json.hpp"
 
 using namespace std;
-
-// for convenience
+using namespace Eigen;
 using json = nlohmann::json;
 
-// Checks if the SocketIO event has JSON data.
-// If there is data the JSON object in string format will be returned,
-// else the empty string "" will be returned.
-std::string hasData(std::string s) {
-  auto found_null = s.find("null");
-  auto b1 = s.find_first_of("[");
-  auto b2 = s.find_first_of("]");
-  if (found_null != std::string::npos) {
-    return "";
-  }
-  else if (b1 != std::string::npos && b2 != std::string::npos) {
-    return s.substr(b1, b2 - b1 + 1);
-  }
-  return "";
+vector<VectorXd> estimations;
+vector<VectorXd> ground_truth;
+
+SensorFusion sf;
+uWS::Hub h;
+
+Radar ParseRadar(istream &tokens) {
+    Radar r;
+
+    // sensor_type, rho_measured, phi_measured, rhodot_measured, timestamp, x_groundtruth, y_groundtruth, vx_groundtruth, vy_groundtruth, yaw_groundtruth, yawrate_groundtruth.
+    tokens >> r.rho >> r.phi >> r.rhodot >> r.timestamp;
+    return r;
 }
 
-int main()
-{
-  uWS::Hub h;
+Laser ParseLaser(istream &tokens) {
+    Laser l;
 
-  // Create a Kalman Filter instance
-  FusionEKF fusionEKF;
+    // sensor_type, x_measured, y_measured, timestamp, x_groundtruth, y_groundtruth, vx_groundtruth, vy_groundtruth, yaw_groundtruth, yawrate_groundtruth.
+    tokens >> l.x >> l.y >> l.timestamp;
+    return l;
+}
 
-  // used to compute the RMSE later
-  Tools tools;
-  vector<VectorXd> estimations;
-  vector<VectorXd> ground_truth;
+Eigen::Vector4d GetGroundTruth(istream &tokens) {
+    double x;
+    double y;
+    double x_dot;
+    double y_dot;
+    //double rho;
+    //double rho_dot;
 
-  h.onMessage([&fusionEKF,&tools,&estimations,&ground_truth](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
-    // "42" at the start of the message means there's a websocket message event.
-    // The 4 signifies a websocket message
-    // The 2 signifies a websocket event
+    tokens >> x >> y >> x_dot >> y_dot; /*>> rho >> rho_dot;*/
 
-    if (length && length > 2 && data[0] == '4' && data[1] == '2')
-    {
+    Vector4d gt_values;
+    gt_values << x, y, x_dot, y_dot;
 
-      auto s = hasData(std::string(data));
-      if (s != "") {
-      	
-        auto j = json::parse(s);
+    return gt_values;
+}
 
-        std::string event = j[0].get<std::string>();
-        
-        if (event == "telemetry") {
-          // j[1] is the data JSON object
-          
-          string sensor_measurment = j[1]["sensor_measurement"];
-          
-          MeasurementPackage meas_package;
-          istringstream iss(sensor_measurment);
-    	  long long timestamp;
+//
+//void ReadFromFile()
+//{
+//	//ifstream is("../data/obj_pose-laser-radar-synthetic-input.txt");
+//	string filename = "../EKF_Data/obj_pose-laser-radar-synthetic-input.txt";
+//	ifstream is(filename);
+//
+//	if (is.is_open()) {
+//
+//		string line;
+//		while (getline(is, line)) {
+//			istringstream iss(line);
+//
+//			string type;
+//			iss >> type;
+//
+//			if (type[0] == 'R') {
+//				Radar r = ParseRadar(iss);
+//				sf.ProcessMeasurement(r);
+//			}
+//			else if (type[0] == 'L') {
+//				Laser l = ParseLaser(iss);
+//				sf.ProcessMeasurement(l);
+//			}
+//
+//			AddToGround(iss);
+//
+//			estimations.push_back(sf.GetState());
+//			cout << "X:" << sf.GetState() << endl << "P:" << sf.GetStateCovariance() << endl;
+//
+//			VectorXd RMSE = Tools::CalculateRMSE(estimations, ground_truth);
+//			cout << "RMSE: " << RMSE << endl;
+//		}
+//
+//		is.close();
+//	}
+//	else {
+//		char error[1024];
+//#ifndef _WIN32
+//		strerror_r(errno, error, sizeof(error));
+//#else
+//		strerror_s(error, sizeof(error), errno);
+//#endif
+//		cerr << "Could not open: " << filename << endl << "Error:" << error << endl;
+//	}
+//}
 
-    	  // reads first element from the current line
-    	  string sensor_type;
-    	  iss >> sensor_type;
 
-    	  if (sensor_type.compare("L") == 0) {
-      	  		meas_package.sensor_type_ = MeasurementPackage::LASER;
-          		meas_package.raw_measurements_ = VectorXd(2);
-          		float px;
-      	  		float py;
-          		iss >> px;
-          		iss >> py;
-          		meas_package.raw_measurements_ << px, py;
-          		iss >> timestamp;
-          		meas_package.timestamp_ = timestamp;
-          } else if (sensor_type.compare("R") == 0) {
+bool GetMeasurementLine(uWS::WebSocket<uWS::SERVER> &ws, char *data, size_t length, string *measurement_line) {
+    bool found = false;
 
-      	  		meas_package.sensor_type_ = MeasurementPackage::RADAR;
-          		meas_package.raw_measurements_ = VectorXd(3);
-          		float ro;
-      	  		float theta;
-      	  		float ro_dot;
-          		iss >> ro;
-          		iss >> theta;
-          		iss >> ro_dot;
-          		meas_package.raw_measurements_ << ro,theta, ro_dot;
-          		iss >> timestamp;
-          		meas_package.timestamp_ = timestamp;
-          }
-          float x_gt;
-    	  float y_gt;
-    	  float vx_gt;
-    	  float vy_gt;
-    	  iss >> x_gt;
-    	  iss >> y_gt;
-    	  iss >> vx_gt;
-    	  iss >> vy_gt;
-    	  VectorXd gt_values(4);
-    	  gt_values(0) = x_gt;
-    	  gt_values(1) = y_gt; 
-    	  gt_values(2) = vx_gt;
-    	  gt_values(3) = vy_gt;
-    	  ground_truth.push_back(gt_values);
-          
-          //Call ProcessMeasurment(meas_package) for Kalman filter
-    	  fusionEKF.ProcessMeasurement(meas_package);    	  
+    // Message should have 42 in the beginning
+    if (length > 2 && data[0] == '4' && data[1] == '2') {
+        data[length] = 0;
 
-    	  //Push the current estimated x,y positon from the Kalman filter's state vector
+        if (strstr(data, "null")) {
+            // send response back to the simulator
+            const char msg[] = "42[\"manual\",{}]";
+            constexpr size_t length = sizeof(msg) - 1;
+            ws.send(msg, length, uWS::OpCode::TEXT);
+        } else {
+            // look for json message inside [ and ]
+            char *start_bracket = strchr(data, '[');
+            if (start_bracket) {
+                auto end_bracket = strrchr(data, ']');
+                if (end_bracket) {
+                    *(end_bracket + 1) = 0;
 
-    	  VectorXd estimate(4);
+                    // convert  message into a JSon object, get the measurement line in case
+                    // it is a telemetry message
+                    auto j = json::parse(start_bracket);
+                    auto wsEvent = j[0].get<std::string>();
 
-    	  double p_x = fusionEKF.ekf_.x_(0);
-    	  double p_y = fusionEKF.ekf_.x_(1);
-    	  double v1  = fusionEKF.ekf_.x_(2);
-    	  double v2 = fusionEKF.ekf_.x_(3);
-
-    	  estimate(0) = p_x;
-    	  estimate(1) = p_y;
-    	  estimate(2) = v1;
-    	  estimate(3) = v2;
-    	  
-    	  estimations.push_back(estimate);
-
-    	  VectorXd RMSE = tools.CalculateRMSE(estimations, ground_truth);
-
-          json msgJson;
-          msgJson["estimate_x"] = p_x;
-          msgJson["estimate_y"] = p_y;
-          msgJson["rmse_x"] =  RMSE(0);
-          msgJson["rmse_y"] =  RMSE(1);
-          msgJson["rmse_vx"] = RMSE(2);
-          msgJson["rmse_vy"] = RMSE(3);
-          auto msg = "42[\"estimate_marker\"," + msgJson.dump() + "]";
-          // std::cout << msg << std::endl;
-          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-	  
+                    if (wsEvent == "telemetry") {
+                        *measurement_line = j[1]["sensor_measurement"];
+                        found = true;
+                    }
+                }
+                else {
+                    // looks like a bad message, it doesn't have a ]
+                    assert(0);
+                }
+            }
         }
-      } else {
-        
-        std::string msg = "42[\"manual\",{}]";
-        ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-      }
     }
 
-  });
-
-  // We don't need this since we're not using HTTP but if it's removed the program
-  // doesn't compile :-(
-  h.onHttpRequest([](uWS::HttpResponse *res, uWS::HttpRequest req, char *data, size_t, size_t) {
-    const std::string s = "<h1>Hello world!</h1>";
-    if (req.getUrl().valueLength == 1)
-    {
-      res->end(s.data(), s.length());
-    }
-    else
-    {
-      // i guess this should be done more gracefully?
-      res->end(nullptr, 0);
-    }
-  });
-
-  h.onConnection([&h](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
-    std::cout << "Connected!!!" << std::endl;
-  });
-
-  h.onDisconnection([&h](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
-    ws.close();
-    std::cout << "Disconnected" << std::endl;
-  });
-
-  int port = 4567;
-  if (h.listen(port))
-  {
-    std::cout << "Listening to port " << port << std::endl;
-  }
-  else
-  {
-    std::cerr << "Failed to listen to port" << std::endl;
-    return -1;
-  }
-  h.run();
+    return found;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+void SendEstimates(uWS::WebSocket<uWS::SERVER> &ws, double px, double py, VectorXd &rmse) {
+    json msgJson;
+    msgJson["estimate_x"] = px;
+    msgJson["estimate_y"] = py;
+    msgJson["rmse_x"] = rmse(0);
+    msgJson["rmse_y"] = rmse(1);
+    msgJson["rmse_vx"] = rmse(2);
+    msgJson["rmse_vy"] = rmse(3);
+
+    auto msg = "42[\"estimate_marker\"," + msgJson.dump() + "]";
+    ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+}
+
+template<class T>
+void ComputeRMSEAndSend(uWS::WebSocket<uWS::SERVER> &ws, T &&ground) {
+    ground_truth.push_back(ground);
+    auto state = sf.GetState();
+    estimations.push_back(state);
+
+    VectorXd rmse = Tools::CalculateRMSE(estimations, ground_truth);
+    SendEstimates(ws, state(0), state(1), rmse);
+}
+
+void ProcessMeasurement(uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+    string measurement;
+    if (GetMeasurementLine(ws, data, length, &measurement)) {
+        //cout << measurement << endl;
+        istringstream iss(measurement);
+
+        string type;
+        iss >> type;
+
+        if (type[0] == 'R') {
+            Radar r = ParseRadar(iss);
+            sf.ProcessMeasurement(r);
+        } else if (type[0] == 'L') {
+            Laser l = ParseLaser(iss);
+            sf.ProcessMeasurement(l);
+        }
+
+        ComputeRMSEAndSend(ws, GetGroundTruth(iss));
+    }
+}
+
+void Initialize(uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
+    string measurement;
+
+    // get a measurement line and call Initialize on SensorFusion for Radar / Laser
+    // change function to be called to
+    if (GetMeasurementLine(ws, data, length, &measurement)) {
+        if (!measurement.empty()) {
+            istringstream iss(measurement);
+
+            string type;
+            iss >> type;
+
+            if (type[0] == 'R') {
+                Radar r = ParseRadar(iss);
+                sf.Initialize(r);
+            } else if (type[0] == 'L') {
+                Laser l = ParseLaser(iss);
+                sf.Initialize(l);
+            }
+
+            if (sf.IsInitialized())
+                h.onMessage(ProcessMeasurement);
+
+            ComputeRMSEAndSend(ws, GetGroundTruth(iss));
+        }
+    }
+}
+
+void ReadFromSim() {
+    h.onMessage(Initialize);
+
+    h.onConnection([](uWS::WebSocket<uWS::SERVER> ws, uWS::HttpRequest req) {
+        std::cout << "Connected!!!" << std::endl;
+    });
+
+    h.onDisconnection([](uWS::WebSocket<uWS::SERVER> ws, int code, char *message, size_t length) {
+        ws.close();
+        std::cout << "Disconnected" << std::endl;
+    });
+
+    int port = 4567;
+    if (h.listen("127.0.0.1", port)) {
+        cout << "Listening on: " << port << endl;
+        h.run();
+    } else
+        cout << "Could not start listening";
+}
+
+int main() {
+    //ReadFromFile();
+    ReadFromSim();
+}
